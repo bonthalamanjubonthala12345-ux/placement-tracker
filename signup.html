@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign Up | Placement Tracker</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="auth-body" data-page="signup">
+  <main class="auth-card">
+    <h2>Create Account</h2>
+    <p class="muted">Set credentials for your tracker</p>
+
+    <form id="signupForm" class="grid-form">
+      <label>
+        Username
+        <input id="newUser" type="text" autocomplete="username" required>
+      </label>
+      <label>
+        Password
+        <input id="newPass" type="password" autocomplete="new-password" minlength="4" required>
+      </label>
+      <button type="submit" class="btn">Create Account</button>
+    </form>
+
+    <p id="error" class="error" role="alert"></p>
+    <p class="link">Already have an account? <a href="login.html">Login</a></p>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
