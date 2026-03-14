@@ -11,7 +11,8 @@ const MONGODB_URI =
   process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/placement_tracker";
 
 app.use(express.json());
-app.use(express.static(__dirname));
+const publicDir = path.join(__dirname, "public");
+app.use(express.static(publicDir));
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -24,7 +25,7 @@ app.use((req, res, next) => {
 });
 
 app.get("/", (_req, res) => {
-  res.sendFile(path.join(__dirname, "index.html"));
+  res.sendFile(path.join(publicDir, "index.html"));
 });
 
 const userSchema = new mongoose.Schema(

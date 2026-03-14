@@ -4,17 +4,8 @@
     { "src": "server.js", "use": "@vercel/node" }
   ],
   "routes": [
-    { "src": "/(.*)", "dest": "/server.js" }
-  ],
-  "functions": {
-    "server.js": {
-      "includeFiles": [
-        "index.html",
-        "style.css",
-        "script.js",
-        "login.html",
-        "signup.html"
-      ]
-    }
-  }
+    { "src": "/api/(.*)", "dest": "/server.js" },
+    { "handle": "filesystem" },
+    { "src": "/(.*)", "dest": "/index.html" }
+  ]
 }
