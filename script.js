@@ -47,7 +47,7 @@ async function apiRequest(path, options = {}) {
     });
   } catch {
     const error = new Error(
-      "Backend not reachable. Start server and open http://localhost:3000/login.html"
+      "Backend not reachable. Please try again later."
     );
     error.status = 0;
     throw error;
