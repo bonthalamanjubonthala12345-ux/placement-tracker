@@ -1,12 +1,14 @@
 const express = require("express");
-const fs = require("fs");
-const path = require("path");
 const crypto = require("crypto");
+const path = require("path");
 const bcrypt = require("bcryptjs");
+const mongoose = require("mongoose");
+require("dotenv").config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const DATA_PATH = path.join(__dirname, "data.json");
+const MONGODB_URI =
+  process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/placement_tracker";
 
 app.use(express.json());
 app.use(express.static(__dirname));
@@ -21,271 +23,322 @@ app.use((req, res, next) => {
   next();
 });
 
-function ensureDataFile() {
-  if (!fs.existsSync(DATA_PATH)) {
-    const initialData = {
-      users: [],
-      problemsByUserId: {},
-      sessions: []
-    };
-    fs.writeFileSync(DATA_PATH, JSON.stringify(initialData, null, 2), "utf8");
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
+});
+
+const userSchema = new mongoose.Schema(
+  {
+    username: { type: String, required: true },
+    usernameKey: { type: String, required: true, unique: true, index: true },
+    passwordHash: { type: String, required: true }
+  },
+  { timestamps: { createdAt: "createdAt", updatedAt: "updatedAt" } }
+);
+
+const sessionSchema = new mongoose.Schema(
+  {
+    token: { type: String, required: true, unique: true, index: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true }
+  },
+  { timestamps: { createdAt: "createdAt", updatedAt: false } }
+);
+
+const problemSchema = new mongoose.Schema(
+  {
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    name: { type: String, required: true },
+    topic: { type: String, default: "Arrays" },
+    difficulty: { type: String, default: "Easy" },
+    status: { type: String, default: "Solved" },
+    platform: { type: String, default: "-" }
+  },
+  { timestamps: { createdAt: "createdAt", updatedAt: "updatedAt" } }
+);
+
+const User = mongoose.model("User", userSchema);
+const Session = mongoose.model("Session", sessionSchema);
+const Problem = mongoose.model("Problem", problemSchema);
+
+async function ensureDbConnection() {
+  if (mongoose.connection.readyState === 1) {
+    return;
   }
-}
-
-function readData() {
-  ensureDataFile();
-  const raw = fs.readFileSync(DATA_PATH, "utf8");
-  const parsed = JSON.parse(raw || "{}");
-  return {
-    users: Array.isArray(parsed.users) ? parsed.users : [],
-    problemsByUserId:
-      parsed.problemsByUserId && typeof parsed.problemsByUserId === "object"
-        ? parsed.problemsByUserId
-        : {},
-    sessions: Array.isArray(parsed.sessions) ? parsed.sessions : []
-  };
-}
-
-function writeData(data) {
-  fs.writeFileSync(DATA_PATH, JSON.stringify(data, null, 2), "utf8");
+  await mongoose.connect(MONGODB_URI);
 }
 
 function sanitizeUser(user) {
   return {
-    id: user.id,
+    id: String(user._id),
     username: user.username,
     createdAt: user.createdAt
   };
 }
 
-function generateId() {
-  return crypto.randomUUID();
+function serializeProblem(problem) {
+  return {
+    id: String(problem._id),
+    name: problem.name,
+    topic: problem.topic,
+    difficulty: problem.difficulty,
+    status: problem.status,
+    platform: problem.platform,
+    createdAt: problem.createdAt
+  };
 }
 
 function generateToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
-function authMiddleware(req, res, next) {
-  const header = req.headers.authorization || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-
-  const data = readData();
-  const session = data.sessions.find((entry) => entry.token === token);
-
-  if (!token || !session) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
-
-  req.userId = session.userId;
-  req.token = token;
-  next();
+function normalizeTopic(topic) {
+  const value = String(topic || "Arrays").trim();
+  return value || "Arrays";
 }
 
-app.post("/api/auth/signup", async (req, res) => {
-  const username = String(req.body?.username || "").trim();
-  const password = String(req.body?.password || "");
-
-  if (username.length < 3) {
-    res.status(400).json({ error: "Username must be at least 3 characters." });
-    return;
-  }
-
-  if (password.length < 4) {
-    res.status(400).json({ error: "Password must be at least 4 characters." });
-    return;
-  }
-
-  const data = readData();
-  const exists = data.users.some(
-    (u) => u.username.toLowerCase() === username.toLowerCase()
-  );
-
-  if (exists) {
-    res.status(409).json({ error: "Username already exists." });
-    return;
-  }
-
-  const passwordHash = await bcrypt.hash(password, 10);
-  const user = {
-    id: generateId(),
-    username,
-    passwordHash,
-    createdAt: new Date().toISOString()
+function asyncHandler(handler) {
+  return async (req, res) => {
+    try {
+      await handler(req, res);
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Internal server error." });
+    }
   };
+}
 
-  data.users.push(user);
-  data.problemsByUserId[user.id] = [];
-  writeData(data);
+async function authMiddleware(req, res, next) {
+  try {
+    const header = req.headers.authorization || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : "";
 
-  const token = generateToken();
-  data.sessions.push({
-    token,
-    userId: user.id,
-    createdAt: new Date().toISOString()
-  });
-  writeData(data);
+    if (!token) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
 
-  res.status(201).json({ token, user: sanitizeUser(user) });
-});
+    const session = await Session.findOne({ token }).lean();
+    if (!session) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
 
-app.post("/api/auth/login", async (req, res) => {
-  const username = String(req.body?.username || "").trim();
-  const password = String(req.body?.password || "");
-
-  const data = readData();
-  const user = data.users.find(
-    (u) => u.username.toLowerCase() === username.toLowerCase()
-  );
-
-  if (!user) {
-    res.status(401).json({ error: "Invalid username or password." });
-    return;
+    req.userId = String(session.userId);
+    req.token = token;
+    next();
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Internal server error." });
   }
+}
 
-  const ok = await bcrypt.compare(password, user.passwordHash);
-  if (!ok) {
-    res.status(401).json({ error: "Invalid username or password." });
-    return;
-  }
+app.post(
+  "/api/auth/signup",
+  asyncHandler(async (req, res) => {
+    await ensureDbConnection();
+    const username = String(req.body?.username || "").trim();
+    const password = String(req.body?.password || "");
 
-  const token = generateToken();
-  data.sessions.push({
-    token,
-    userId: user.id,
-    createdAt: new Date().toISOString()
-  });
-  writeData(data);
+    if (username.length < 3) {
+      res.status(400).json({ error: "Username must be at least 3 characters." });
+      return;
+    }
 
-  res.json({ token, user: sanitizeUser(user) });
-});
+    if (password.length < 4) {
+      res.status(400).json({ error: "Password must be at least 4 characters." });
+      return;
+    }
 
-app.post("/api/auth/logout", authMiddleware, (req, res) => {
-  const data = readData();
-  data.sessions = data.sessions.filter((entry) => entry.token !== req.token);
-  writeData(data);
-  res.json({ ok: true });
-});
+    const usernameKey = username.toLowerCase();
+    const exists = await User.findOne({ usernameKey }).lean();
+    if (exists) {
+      res.status(409).json({ error: "Username already exists." });
+      return;
+    }
 
-app.get("/api/auth/me", authMiddleware, (req, res) => {
-  const data = readData();
-  const user = data.users.find((u) => u.id === req.userId);
+    const passwordHash = await bcrypt.hash(password, 10);
+    const user = await User.create({ username, usernameKey, passwordHash });
 
-  if (!user) {
-    data.sessions = data.sessions.filter((entry) => entry.token !== req.token);
-    writeData(data);
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
+    const token = generateToken();
+    await Session.create({ token, userId: user._id });
 
-  res.json({ user: sanitizeUser(user) });
-});
+    res.status(201).json({ token, user: sanitizeUser(user) });
+  })
+);
 
-app.get("/api/problems", authMiddleware, (req, res) => {
-  const data = readData();
-  const list = Array.isArray(data.problemsByUserId[req.userId])
-    ? data.problemsByUserId[req.userId]
-    : [];
+app.post(
+  "/api/auth/login",
+  asyncHandler(async (req, res) => {
+    await ensureDbConnection();
+    const username = String(req.body?.username || "").trim();
+    const password = String(req.body?.password || "");
 
-  res.json({ problems: list });
-});
+    const user = await User.findOne({ usernameKey: username.toLowerCase() });
+    if (!user) {
+      res.status(401).json({ error: "Invalid username or password." });
+      return;
+    }
 
-app.post("/api/problems", authMiddleware, (req, res) => {
-  const name = String(req.body?.name || "").trim();
-  const topic = String(req.body?.topic || "Arrays");
-  const difficulty = String(req.body?.difficulty || "Easy");
-  const status = String(req.body?.status || "Solved");
-  const platform = String(req.body?.platform || "-").trim() || "-";
+    const ok = await bcrypt.compare(password, user.passwordHash);
+    if (!ok) {
+      res.status(401).json({ error: "Invalid username or password." });
+      return;
+    }
 
-  if (!name) {
-    res.status(400).json({ error: "Problem name is required." });
-    return;
-  }
+    const token = generateToken();
+    await Session.create({ token, userId: user._id });
 
-  const data = readData();
-  const list = Array.isArray(data.problemsByUserId[req.userId])
-    ? data.problemsByUserId[req.userId]
-    : [];
+    res.json({ token, user: sanitizeUser(user) });
+  })
+);
 
-  const problem = {
-    id: generateId(),
-    name,
-    topic,
-    difficulty,
-    status,
-    platform,
-    createdAt: new Date().toISOString()
-  };
+app.post(
+  "/api/auth/logout",
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    await ensureDbConnection();
+    await Session.deleteOne({ token: req.token });
+    res.json({ ok: true });
+  })
+);
 
-  list.unshift(problem);
-  data.problemsByUserId[req.userId] = list;
-  writeData(data);
+app.get(
+  "/api/auth/me",
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    await ensureDbConnection();
+    const user = await User.findById(req.userId);
+    if (!user) {
+      await Session.deleteOne({ token: req.token });
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
 
-  res.status(201).json({ problem });
-});
+    res.json({ user: sanitizeUser(user) });
+  })
+);
 
-app.put("/api/problems/:id", authMiddleware, (req, res) => {
-  const problemId = String(req.params.id || "");
-  const name = String(req.body?.name || "").trim();
+app.get(
+  "/api/problems",
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    await ensureDbConnection();
+    const problems = await Problem.find({ userId: req.userId }).sort({ createdAt: -1 });
+    res.json({ problems: problems.map(serializeProblem) });
+  })
+);
 
-  if (!name) {
-    res.status(400).json({ error: "Problem name is required." });
-    return;
-  }
+app.post(
+  "/api/problems",
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    await ensureDbConnection();
+    const name = String(req.body?.name || "").trim();
+    const topic = normalizeTopic(req.body?.topic);
+    const difficulty = String(req.body?.difficulty || "Easy").trim() || "Easy";
+    const status = String(req.body?.status || "Solved").trim() || "Solved";
+    const platform = String(req.body?.platform || "-").trim() || "-";
 
-  const data = readData();
-  const list = Array.isArray(data.problemsByUserId[req.userId])
-    ? data.problemsByUserId[req.userId]
-    : [];
+    if (!name) {
+      res.status(400).json({ error: "Problem name is required." });
+      return;
+    }
 
-  const idx = list.findIndex((p) => p.id === problemId);
-  if (idx === -1) {
-    res.status(404).json({ error: "Problem not found." });
-    return;
-  }
+    const problem = await Problem.create({
+      userId: req.userId,
+      name,
+      topic,
+      difficulty,
+      status,
+      platform
+    });
 
-  list[idx] = {
-    ...list[idx],
-    name,
-    topic: String(req.body?.topic || list[idx].topic),
-    difficulty: String(req.body?.difficulty || list[idx].difficulty),
-    status: String(req.body?.status || list[idx].status),
-    platform: String(req.body?.platform || "-").trim() || "-"
-  };
+    res.status(201).json({ problem: serializeProblem(problem) });
+  })
+);
 
-  data.problemsByUserId[req.userId] = list;
-  writeData(data);
+app.put(
+  "/api/problems/:id",
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    await ensureDbConnection();
+    const problemId = String(req.params.id || "");
+    const name = String(req.body?.name || "").trim();
 
-  res.json({ problem: list[idx] });
-});
+    if (!name) {
+      res.status(400).json({ error: "Problem name is required." });
+      return;
+    }
 
-app.delete("/api/problems/:id", authMiddleware, (req, res) => {
-  const problemId = String(req.params.id || "");
-  const data = readData();
-  const list = Array.isArray(data.problemsByUserId[req.userId])
-    ? data.problemsByUserId[req.userId]
-    : [];
+    if (!mongoose.Types.ObjectId.isValid(problemId)) {
+      res.status(404).json({ error: "Problem not found." });
+      return;
+    }
 
-  const next = list.filter((p) => p.id !== problemId);
-  data.problemsByUserId[req.userId] = next;
-  writeData(data);
+    const problem = await Problem.findOne({ _id: problemId, userId: req.userId });
+    if (!problem) {
+      res.status(404).json({ error: "Problem not found." });
+      return;
+    }
 
-  res.json({ ok: true });
-});
+    problem.name = name;
+    problem.topic = normalizeTopic(req.body?.topic || problem.topic);
+    problem.difficulty = String(req.body?.difficulty || problem.difficulty).trim() || "Easy";
+    problem.status = String(req.body?.status || problem.status).trim() || "Solved";
+    problem.platform = String(req.body?.platform || "-").trim() || "-";
+    await problem.save();
 
-app.delete("/api/problems", authMiddleware, (req, res) => {
-  const data = readData();
-  data.problemsByUserId[req.userId] = [];
-  writeData(data);
-  res.json({ ok: true });
-});
+    res.json({ problem: serializeProblem(problem) });
+  })
+);
+
+app.delete(
+  "/api/problems/:id",
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    await ensureDbConnection();
+    const problemId = String(req.params.id || "");
+
+    if (!mongoose.Types.ObjectId.isValid(problemId)) {
+      res.json({ ok: true });
+      return;
+    }
+
+    await Problem.deleteOne({ _id: problemId, userId: req.userId });
+    res.json({ ok: true });
+  })
+);
+
+app.delete(
+  "/api/problems",
+  authMiddleware,
+  asyncHandler(async (req, res) => {
+    await ensureDbConnection();
+    await Problem.deleteMany({ userId: req.userId });
+    res.json({ ok: true });
+  })
+);
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, timestamp: new Date().toISOString() });
+  res.json({
+    ok: true,
+    timestamp: new Date().toISOString(),
+    dbState: mongoose.connection.readyState
+  });
 });
 
-app.listen(PORT, () => {
-  ensureDataFile();
-  console.log(`Placement tracker backend running on http://localhost:${PORT}`);
-});
+async function start() {
+  await ensureDbConnection();
+  app.listen(PORT, () => {
+    console.log(`Placement tracker backend running on http://localhost:${PORT}`);
+  });
+}
+
+if (require.main === module) {
+  start().catch((error) => {
+    console.error("Failed to start server:", error);
+    process.exit(1);
+  });
+}
+
+module.exports = app;
