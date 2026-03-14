@@ -1,4 +1,12 @@
 RewriteEngine On
 
+# Block direct access to SQLite files
+<FilesMatch "\.(db|sqlite|sqlite3)$">
+  Require all denied
+</FilesMatch>
+
+# Prevent browsing the data folder directly
+RewriteRule ^data/ - [F,L]
+
 # Route API calls to api.php
 RewriteRule ^api/(.*)$ api.php [QSA,L]
